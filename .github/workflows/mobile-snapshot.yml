@@ -65,7 +65,7 @@ jobs:
         run: |
           npm run build:android-web
           sed -i 's/\r$//' android/gradlew
-          bash android/gradlew -p android assembleDebug lintDebug --no-daemon
+          bash android/gradlew -p android assembleDebug testDebugUnitTest lintDebug --no-daemon
       - name: Verify installable audit APK
         if: matrix.platform == 'android'
         working-directory: QQPet-Build
