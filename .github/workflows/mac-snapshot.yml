@@ -15,6 +15,7 @@ permissions:
 jobs:
   mac:
     runs-on: macos-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -38,20 +39,30 @@ jobs:
           ditto -x -k input/QQPet-Build.zip .
           cd QQPet-Build
           shasum -a 256 -c SOURCE-SHA256SUMS.txt > source-verification.log
-      - name: Install, build backend and run isolated regressions
+      - name: Install locked dependencies
+        working-directory: QQPet-Build
+        timeout-minutes: 10
+        run: npm ci --foreground-scripts
+      - name: Typecheck and build backend
         working-directory: QQPet-Build
         run: |
-          npm ci
           npm run typecheck
           npm run build:server
-          npm run test:cloud
-          npm run test:actions
-          npm run test:health
-          npm run test:caretaker
-          npm run test:world
-          npm run test:wallet
-          npm run test:server
-          npm run build
+      - name: Cloud save tests
+        working-directory: QQPet-Build
+        timeout-minutes: 3
+        run: npm run test:cloud
+      - name: Action and runtime tests
+        working-directory: QQPet-Build
+        timeout-minutes: 3
+        run: npm run test:actions
+      - name: Other backend tests
+        working-directory: QQPet-Build
+        timeout-minutes: 5
+        run: npm run test:health && npm run test:caretaker && npm run test:world && npm run test:wallet && npm run test:server
+      - name: Compile Electron
+        working-directory: QQPet-Build
+        run: npm run build
       - name: Build unsigned native DMG and ZIP for architecture
         working-directory: QQPet-Build
         env:
