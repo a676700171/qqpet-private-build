@@ -1,0 +1,54 @@
+name: Preserve verified audit installers
+on:
+  workflow_dispatch:
+    inputs:
+      source_run:
+        description: Successful mac-snapshot workflow run ID
+        required: true
+        type: string
+      release_tag:
+        description: Private audit prerelease tag (never a production release)
+        required: true
+        type: string
+permissions:
+  actions: read
+  contents: write
+jobs:
+  preserve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Verify source workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ inputs.source_run }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN" =~ ^[0-9]+$ ]]
+          [[ "$RELEASE_TAG" =~ ^audit-[a-zA-Z0-9._-]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" > run.json
+          jq -e '.conclusion == "success" and .path == ".github/workflows/mac-snapshot.yml"' run.json
+      - uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.source_run }}
+          github-token: ${{ github.token }}
+          pattern: QQPet-audit-macOS-*
+          path: packages
+      - name: Verify installer hashes and preserve in private prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_RUN: ${{ inputs.source_run }}
+        run: |
+          set -euo pipefail
+          for arch in arm64 x64; do
+            dir="packages/QQPet-audit-macOS-$arch"
+            (cd "$dir" && sed 's|  dist/|  |' SHA256SUMS.txt | sha256sum -c -)
+          done
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --prerelease --latest=false --title 'Internal audit installers - not a production upgrade' --notes "Unsigned macOS audit builds from verified workflow $SOURCE_RUN. Full server-authoritative migration is incomplete. Do not deploy as a production upgrade."
+          for arch in arm64 x64; do
+            dir="packages/QQPet-audit-macOS-$arch"
+            cp "$dir/SHA256SUMS.txt" "$dir/SHA256SUMS-mac-$arch.txt"
+            gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" "$dir"/*.dmg "$dir"/*.zip "$dir/SHA256SUMS-mac-$arch.txt"
+          done
