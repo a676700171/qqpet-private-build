@@ -44,7 +44,11 @@ jobs:
           [[ "$EXPECTED_SHA256" =~ ^[a-f0-9]{64}$ ]]
           gh release download "$INPUT_TAG" --repo "$GITHUB_REPOSITORY" --pattern QQPet-Build.zip --dir input
           printf '%s  input/QQPet-Build.zip\n' "$EXPECTED_SHA256" | shasum -a 256 -c -
-          if [ "$RUNNER_OS" = macOS ]; then ditto -x -k input/QQPet-Build.zip .; else unzip -q input/QQPet-Build.zip; fi
+          if [ "$RUNNER_OS" = macOS ]; then
+            ditto -x -k input/QQPet-Build.zip .
+          else
+            python3 -m zipfile --metadata-encoding utf-8 -e input/QQPet-Build.zip .
+          fi
           cd QQPet-Build
           shasum -a 256 -c SOURCE-SHA256SUMS.txt > source-verification.log
       - name: Install and typecheck
