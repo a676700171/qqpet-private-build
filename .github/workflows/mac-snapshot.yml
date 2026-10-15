@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       input_tag:
-        description: Private draft release containing the immutable source archive
+        description: Private prerelease containing the immutable source archive
         required: true
         type: string
       sha256:
@@ -34,7 +34,8 @@ jobs:
           [[ "$EXPECTED_SHA256" =~ ^[a-f0-9]{64}$ ]]
           gh release download "$INPUT_TAG" --repo "$GITHUB_REPOSITORY" --pattern QQPet-Build.zip --dir input
           printf '%s  input/QQPet-Build.zip\n' "$EXPECTED_SHA256" | shasum -a 256 -c -
-          unzip -q input/QQPet-Build.zip
+          # macOS Info-ZIP can misdecode UTF-8 Chinese filenames in Windows ZIPs.
+          ditto -x -k input/QQPet-Build.zip .
           cd QQPet-Build
           shasum -a 256 -c SOURCE-SHA256SUMS.txt > source-verification.log
       - name: Install, build backend and run isolated regressions
