@@ -1,0 +1,84 @@
+name: Build audited local QQPet snapshot
+on:
+  workflow_dispatch:
+    inputs:
+      input_tag:
+        description: Private draft release containing the immutable source archive
+        required: true
+        type: string
+      sha256:
+        description: Expected SHA256 of QQPet-Build.zip
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  mac:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x64]
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Download the exact local snapshot (not the upstream HEAD)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.input_tag }}
+          EXPECTED_SHA256: ${{ inputs.sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$INPUT_TAG" =~ ^[a-zA-Z0-9._-]+$ ]]
+          [[ "$EXPECTED_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          gh release download "$INPUT_TAG" --repo "$GITHUB_REPOSITORY" --pattern QQPet-Build.zip --dir input
+          printf '%s  input/QQPet-Build.zip\n' "$EXPECTED_SHA256" | shasum -a 256 -c -
+          unzip -q input/QQPet-Build.zip
+          cd QQPet-Build
+          shasum -a 256 -c SOURCE-SHA256SUMS.txt > source-verification.log
+      - name: Install, build backend and run isolated regressions
+        working-directory: QQPet-Build
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build:server
+          npm run test:cloud
+          npm run test:actions
+          npm run test:health
+          npm run test:caretaker
+          npm run test:world
+          npm run test:wallet
+          npm run test:server
+          npm run build
+      - name: Build unsigned native DMG and ZIP for architecture
+        working-directory: QQPet-Build
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          BUILD_ARCH: ${{ matrix.arch }}
+        run: npx electron-builder --mac dmg zip --"$BUILD_ARCH" --publish never
+      - name: Assert executable architecture and hash installers
+        working-directory: QQPet-Build
+        env:
+          BUILD_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          binary=$(find dist -path '*/Contents/MacOS/QQPet' -type f -print -quit)
+          test -n "$binary"
+          actual=$(lipo -archs "$binary")
+          expected="$BUILD_ARCH"
+          if [ "$expected" = x64 ]; then expected=x86_64; fi
+          test "$actual" = "$expected"
+          printf 'Native architecture: %s\nUnsigned audit build; not a production rollout.\n' "$actual" > dist/BUILD-NOTES.txt
+          shasum -a 256 dist/*.dmg dist/*.zip > dist/SHA256SUMS.txt
+          cp SOURCE-SHA256SUMS.txt dist/SOURCE-SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QQPet-audit-macOS-${{ matrix.arch }}
+          path: |
+            QQPet-Build/dist/*.dmg
+            QQPet-Build/dist/*.zip
+            QQPet-Build/dist/*SUMS.txt
+            QQPet-Build/dist/BUILD-NOTES.txt
+          if-no-files-found: error
+          retention-days: 14
