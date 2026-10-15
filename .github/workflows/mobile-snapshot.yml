@@ -1,0 +1,145 @@
+name: Build audited mobile snapshot
+on:
+  workflow_dispatch:
+    inputs:
+      input_tag:
+        description: Prerelease containing immutable QQPet-Build.zip
+        required: true
+        type: string
+      sha256:
+        description: SHA256 of the build input
+        required: true
+        type: string
+      output_tag:
+        description: New audit prerelease for APK and unsigned IPA
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  mobile:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: android
+            os: ubuntu-latest
+          - platform: ios
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Fetch and verify the authorized local build input
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.input_tag }}
+          EXPECTED_SHA256: ${{ inputs.sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$INPUT_TAG" =~ ^[a-zA-Z0-9._-]+$ ]]
+          [[ "$EXPECTED_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          gh release download "$INPUT_TAG" --repo "$GITHUB_REPOSITORY" --pattern QQPet-Build.zip --dir input
+          printf '%s  input/QQPet-Build.zip\n' "$EXPECTED_SHA256" | shasum -a 256 -c -
+          if [ "$RUNNER_OS" = macOS ]; then ditto -x -k input/QQPet-Build.zip .; else unzip -q input/QQPet-Build.zip; fi
+          cd QQPet-Build
+          shasum -a 256 -c SOURCE-SHA256SUMS.txt > source-verification.log
+      - name: Install and typecheck
+        working-directory: QQPet-Build
+        run: npm ci --foreground-scripts && npm run typecheck && npm run test:actions
+      - uses: actions/setup-java@v4
+        if: matrix.platform == 'android'
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Compile Android and run lint
+        if: matrix.platform == 'android'
+        working-directory: QQPet-Build
+        run: |
+          npm run build:android-web
+          bash android/gradlew -p android assembleDebug lintDebug --no-daemon
+      - name: Verify installable audit APK
+        if: matrix.platform == 'android'
+        working-directory: QQPet-Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          mkdir -p dist
+          cp android/app/build/outputs/apk/debug/app-debug.apk "dist/QQPet-${version}-android-audit.apk"
+          build_tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
+          "$build_tools/apksigner" verify --verbose --print-certs "dist/QQPet-${version}-android-audit.apk" > dist/ANDROID-SIGNATURE.txt
+          "$build_tools/aapt" dump badging "dist/QQPet-${version}-android-audit.apk" > dist/ANDROID-PACKAGE.txt
+          grep -F "versionName='$version'" dist/ANDROID-PACKAGE.txt
+          printf 'Internal audit APK; debug signing key; Android 11 or later. Not a production rollout.\n' > dist/ANDROID-BUILD-NOTES.txt
+          (cd dist && shasum -a 256 *.apk > SHA256SUMS-android.txt)
+      - name: Build unsigned iPhone app
+        if: matrix.platform == 'ios'
+        working-directory: QQPet-Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build:ios-web
+          npm run pack:ios
+          brew install xcodegen
+          (cd ios && xcodegen generate)
+          version=$(node -p "require('./package.json').version")
+          xcodebuild -project ios/QQPet.xcodeproj -scheme QQPet -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath ios/build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            MARKETING_VERSION="$version" CURRENT_PROJECT_VERSION="3" build
+      - name: Verify and package unsigned IPA
+        if: matrix.platform == 'ios'
+        working-directory: QQPet-Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          app=ios/build/Build/Products/Release-iphoneos/QQPet.app
+          test -f "$app/QQPet"
+          test -f "$app/Web/index.html"
+          test "$(lipo -archs "$app/QQPet")" = arm64
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app/Info.plist")" = "$version"
+          mkdir -p dist/Payload
+          cp -R "$app" dist/Payload/
+          (cd dist && zip -qry "QQPet-${version}-ios-unsigned.ipa" Payload)
+          unzip -t "dist/QQPet-${version}-ios-unsigned.ipa" > dist/IOS-ARCHIVE-CHECK.txt
+          printf 'Unsigned arm64 device build; iOS 16 or later. Requires re-signing with an Apple provisioning profile before installation. Not a production rollout.\n' > dist/IOS-BUILD-NOTES.txt
+          (cd dist && shasum -a 256 *.ipa > SHA256SUMS-ios.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QQPet-audit-${{ matrix.platform }}
+          path: |
+            QQPet-Build/dist/*.apk
+            QQPet-Build/dist/*.ipa
+            QQPet-Build/dist/*.txt
+          if-no-files-found: error
+          retention-days: 14
+  publish:
+    needs: mobile
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: QQPet-audit-*
+          path: artifacts
+          merge-multiple: true
+      - name: Verify and retain packages in the authorized build repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUTPUT_TAG: ${{ inputs.output_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$OUTPUT_TAG" =~ ^[a-zA-Z0-9._-]+$ ]]
+          (cd artifacts && sha256sum -c SHA256SUMS-android.txt && sha256sum -c SHA256SUMS-ios.txt)
+          test "$GITHUB_REPOSITORY" = a676700171/qqpet-private-build
+          gh release create "$OUTPUT_TAG" artifacts/*.apk artifacts/*.ipa artifacts/*.txt \
+            --repo "$GITHUB_REPOSITORY" --prerelease --title "$OUTPUT_TAG" \
+            --notes 'Internal audit packages only. APK is debug-signed. IPA is unsigned and must be re-signed before installation. Backend rollout and full server-authority migration are not complete.'
