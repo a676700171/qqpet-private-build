@@ -60,6 +60,10 @@ jobs:
         working-directory: QQPet-Build
         timeout-minutes: 5
         run: npm run test:health && npm run test:caretaker && npm run test:world && npm run test:wallet && npm run test:server
+      - name: Reward authority and wallet accounting
+        working-directory: QQPet-Build
+        timeout-minutes: 5
+        run: npm run test:rewards && npm run test:reward-server && npm run test:authority
       - name: Compile Electron
         working-directory: QQPet-Build
         run: npm run build
